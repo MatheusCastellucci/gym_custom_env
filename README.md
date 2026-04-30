@@ -175,3 +175,51 @@ O ambiente CPP possui renderização visual com as seguintes indicações:
 - **Branco**: células livres ainda não visitadas
 - **Texto no topo**: cobertura atual e número de passos
 
+---
+
+## Melhoria do agente CPP: Aprendizado por Currículo e Direção ao Frontier
+
+Esta seção descreve as melhorias implementadas para que o agente consiga generalizar para ambientes maiores (10×10) mantendo alta cobertura.
+
+### Relatório
+
+O relatório completo da estratégia adotada, implementação e resultados está disponível em:
+
+📄 **[report/relatorio.md](report/relatorio.md)**
+
+O relatório contém:
+- Análise das causas de falha do agente no ambiente 10×10
+- Descrição e justificativa da estratégia escolhida
+- Detalhes de implementação
+- Resultados quantitativos (Full Coverage Rate nos ambientes 5×5 e 10×10)
+- Análise e limitações
+
+### Estratégia implementada
+
+Dois aprimoramentos foram combinados:
+
+1. **Observação de Frontier** (`gymnasium_env/grid_world_cpp_v2.py`): adiciona ao espaço de observação um vetor `[dx_norm, dy_norm, dist_norm]` que indica a direção e distância normalizadas até a célula não visitada mais próxima. Isso fornece ao agente um "bússola" para áreas não exploradas, eliminando o comportamento de loop quando todos os vizinhos imediatos já foram visitados.
+
+2. **Aprendizado por Currículo** (`train_grid_world_cpp_v2.py`): o agente é treinado em duas fases:
+   - **Phase 1**: treinamento do zero no ambiente 5×5 (1 000 000 timesteps)
+   - **Phase 2**: fine-tuning do modelo da Phase 1 no ambiente 10×10 (1 000 000 timesteps)
+
+### Como executar (V2)
+
+```bash
+# Treinamento completo com currículo (5x5 -> 10x10 automaticamente)
+python train_grid_world_cpp_v2.py train
+
+# Treinar apenas no 5x5 (Phase 1)
+python train_grid_world_cpp_v2.py train_5x5
+
+# Fine-tuning no 10x10 a partir de um modelo existente (Phase 2)
+python train_grid_world_cpp_v2.py train_10x10
+
+# Testar modelo nos dois ambientes (100 episódios cada)
+python train_grid_world_cpp_v2.py test
+
+# Visualizar o agente em ação
+python train_grid_world_cpp_v2.py run
+```
+
