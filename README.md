@@ -148,23 +148,31 @@ Para testar o ambiente CPP com um **agente aleatório** em um grid 5x5:
 python run_grid_world_cpp.py
 ```
 
-Para **treinar** um agente com PPO:
+Para **treinar** um agente com PPO para um ambiente 5x5, 3 obstáculos, máximo de 200 passos e 500.000 timesteps:
 
 ```bash
-python train_grid_world_cpp.py train
+python train_grid_world_cpp.py train 5 3 200 500000
 ```
 
-Para **testar** o agente treinado em 100 episódios:
+Para **testar** o agente treinado em 100 episódios em um ambiente 5x5 com 3 obstáculos:
 
 ```bash
-python train_grid_world_cpp.py test
+python train_grid_world_cpp.py test 5 3
 ```
 
-Para **visualizar** o agente treinado em um único episódio:
+Para **visualizar** o agente treinado em um único episódio em um ambiente 5x5 com 3 obstáculos:
 
 ```bash
-python train_grid_world_cpp.py run
+python train_grid_world_cpp.py run 5 3
 ```
+
+Para treinar no modo de **curriculum learning**, onde o agente é treinado progressivamente em ambientes mais difíceis (5x5 com 3 obstáculos, depois 10x10 com 12 obstáculos, e finalmente 20x20 com 48 obstáculos):
+
+```bash
+python train_grid_world_cpp.py curriculum 5 3 200 500000
+```
+
+Neste caso, você terá que informar também o modelo inicial da rede. Geralmente, é um modelo pré-treinado em um ambiente mais simples (ex: 5x5 com 3 obstáculos) que será utilizado como ponto de partida para o treinamento em ambientes mais complexos.
 
 ### Renderização
 

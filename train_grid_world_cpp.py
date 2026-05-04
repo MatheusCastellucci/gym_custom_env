@@ -1,5 +1,5 @@
 #
-# python train_grid_world_cpp.py <train|test|run>
+# python train_grid_world_cpp.py <train|test|run|curriculum> dim obstacles max_steps total_timesteps
 #
 
 import gymnasium as gym
@@ -18,11 +18,26 @@ def print_action(action: int) -> str:
         3: "down",
     }.get(action, "unknown")
 
-if len(sys.argv) < 2 or sys.argv[1] not in ['train', 'test', 'run']:
-    print("Usage: python train_grid_world_cpp.py <train|test|run>")
+if sys.argv[1] not in ['train', 'test', 'run', 'curriculum']:
+    print("Usage: python train_grid_world_cpp.py <train|test|run|curriculum> dim obstacles max_steps total_timesteps")
     sys.exit(1)
+elif sys.argv[1] in ['train','curriculum']:
+    if len(sys.argv) != 6:
+        print("Usage for training: python train_grid_world_cpp.py train|curriculum dim obstacles max_steps total_timesteps")
+        sys.exit(1)
+elif sys.argv[1] in ['test', 'run']:
+    if len(sys.argv) != 4:
+        print("Usage for testing/running: python train_grid_world_cpp.py test|run dim obstacles")
+        sys.exit(1)
 
+# --- Hyperparameters ---
 mode = sys.argv[1]
+DIM = int(sys.argv[2]) # 5, 10, 20
+OBSTACLES = int(sys.argv[3]) # 3, 12, 48
+MAX_STEPS = int(sys.argv[4]) # 200, 500, 1000
+TOTAL_TIMESTEPS = int(sys.argv[5]) # 500_000
+ENTROPY_COEF = 0.05
+# -----------------------
 
 try:
     gym.register(
@@ -32,13 +47,7 @@ try:
 except Exception:
     pass
 
-# --- Hyperparameters ---
-DIM = 10 # 5, 20
-OBSTACLES = 12
-MAX_STEPS = 200
-TOTAL_TIMESTEPS = 1_000_000
-ENTROPY_COEF = 0.05
-# -----------------------
+
 
 if mode == 'train':
     print("--- Starting CPP Training ---")
@@ -56,6 +65,44 @@ if mode == 'train':
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = f'log/ppo_cpp_{DIM}_{OBSTACLES}_{MAX_STEPS}_{ENTROPY_COEF}_{timestamp}'
     model_path = f'data/ppo_cpp_{DIM}_{OBSTACLES}_{MAX_STEPS}_{ENTROPY_COEF}_{timestamp}.zip'
+
+    new_logger = configure(log_dir, ["stdout", "csv", "tensorboard"])
+    model.set_logger(new_logger)
+
+    print(f"Starting learning with {TOTAL_TIMESTEPS} timesteps...")
+    model.learn(total_timesteps=TOTAL_TIMESTEPS)
+    model.save(model_path)
+    print(f"Model trained and saved to {model_path}")
+    print(f"Logs saved to {log_dir}")
+
+elif mode == 'curriculum':
+
+    print("--- Starting CPP Curriculum Learning Training ---")
+    
+    model_name = input("Enter model filename (e.g., ppo_cpp_5_3_200_0.05_20260324_100000): ")
+    model_path = f'data/{model_name}.zip'
+
+    env = gym.make(        
+        "gymnasium_env/GridWorldCPP-v0",
+        size=DIM,
+        obs_quantity=OBSTACLES,
+        max_steps=MAX_STEPS,
+        render_mode="rgb_array"
+    )
+
+    # Carrega os pesos do modelo 5x5 e associa ao novo ambiente
+    model = PPO.load(
+        model_path,
+        env=env,
+        device="cpu"
+    )
+
+    # Continua o treinamento com os pesos já inicializados
+    model.learn(total_timesteps=MAX_STEPS, reset_num_timesteps=False)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = f'log/ppo_cpp_{DIM}_{OBSTACLES}_{MAX_STEPS}_{ENTROPY_COEF}_{timestamp}_curriculum'
+    model_path = f'data/ppo_cpp_{DIM}_{OBSTACLES}_{MAX_STEPS}_{ENTROPY_COEF}_{timestamp}_curriculum.zip'
 
     new_logger = configure(log_dir, ["stdout", "csv", "tensorboard"])
     model.set_logger(new_logger)
@@ -86,7 +133,7 @@ elif mode == 'run':
     steps = 0
     total_reward = 0
     while not done and not truncated:
-        action, _ = model.predict(obs, deterministic=True)
+        action, _ = model.predict(obs, deterministic=False)
         obs, reward, done, truncated, info = env.step(action.item())
         total_reward += reward
         steps += 1
