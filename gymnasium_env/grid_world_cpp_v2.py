@@ -9,11 +9,11 @@ import pygame
 #
 # Key improvements over V1:
 #
-#   FRONTIER (BFS-based):
-#     The frontier observation uses BFS through the grid (respecting obstacles but
-#     traversing visited cells) to find the actual shortest path to the nearest
-#     unvisited cell. The output is the direction of the FIRST STEP of that path.
-#     This directly fixes two failure modes:
+#   FRONTIER (BFS-based, partial observation):
+#     The frontier observation uses BFS through the grid (respecting only obstacles
+#     already seen in the 3x3 view, traversing visited cells) to find the shortest
+#     known path to the nearest unvisited cell. The output is the direction of the
+#     FIRST STEP of that path. This directly fixes two failure modes:
 #       - Dead-end / corridor trap: Euclidean direction pointed through walls;
 #         BFS correctly says "backtrack through visited cells to exit".
 #       - Oscillation: BFS gives a deterministic, optimal next-step direction
@@ -58,6 +58,7 @@ class GridWorldCPPEnvV2(gym.Env):
 
         self.visited: set = set()
         self._reachable_cells: set = set()  # free cells reachable from agent start
+        self._known_obstacle_set: set = set()  # obstacles seen in 3x3 view (partial obs)
         self._agent_location = np.array([-1, -1], dtype=int)
         self._neighbors = np.zeros((3, 3), dtype=int)
 
@@ -139,7 +140,7 @@ class GridWorldCPPEnvV2(gym.Env):
 
         for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             nx, ny = ax + dx, ay + dy
-            if 0 <= nx < self.size and 0 <= ny < self.size and (nx, ny) not in self._obstacle_set:
+            if 0 <= nx < self.size and 0 <= ny < self.size and (nx, ny) not in self._known_obstacle_set:
                 seen.add((nx, ny))
                 queue.append((nx, ny, dx, dy, 1))
 
@@ -158,7 +159,7 @@ class GridWorldCPPEnvV2(gym.Env):
             for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                 nx, ny = x + dx, y + dy
                 if (0 <= nx < self.size and 0 <= ny < self.size
-                        and (nx, ny) not in self._obstacle_set
+                        and (nx, ny) not in self._known_obstacle_set
                         and (nx, ny) not in seen):
                     seen.add((nx, ny))
                     queue.append((nx, ny, first_dx, first_dy, dist + 1))
@@ -195,6 +196,7 @@ class GridWorldCPPEnvV2(gym.Env):
                     matrix[i][j] = 1
                 elif (nx, ny) in self._obstacle_set:
                     matrix[i][j] = 1
+                    self._known_obstacle_set.add((nx, ny))
                 elif (nx, ny) in self.visited:
                     matrix[i][j] = 2
         self._neighbors = matrix
@@ -213,6 +215,7 @@ class GridWorldCPPEnvV2(gym.Env):
         self.count_steps = 0
         self.obstacles_locations = []
         self._obstacle_set = set()
+        self._known_obstacle_set = set()
         self.visited = set()
 
         self._agent_location = self.np_random.integers(0, self.size, size=2, dtype=int)
