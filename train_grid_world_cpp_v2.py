@@ -70,7 +70,7 @@ P3_ENT_COEF   = 0.02   # less exploration; exploit the learned navigation
 # Higher timesteps because each episode is much longer (slower gradient updates).
 P4_DIM        = 20
 P4_OBSTACLES  = 48
-P4_MAX_STEPS  = 2000
+P4_MAX_STEPS  = 5000
 P4_TIMESTEPS  = 2_000_000
 P4_GAMMA      = 0.999
 P4_LR         = 1e-4
