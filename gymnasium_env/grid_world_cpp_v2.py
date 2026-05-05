@@ -7,32 +7,28 @@ import pygame
 #
 # Coverage Path Planning (CPP) environment - V2
 #
-# Key improvements over V1:
-#
-#   FRONTIER (BFS-based, partial observation):
-#     The frontier observation uses BFS through the grid (respecting only obstacles
-#     already seen in the 3x3 view, traversing visited cells) to find the shortest
-#     known path to the nearest unvisited cell. The output is the direction of the
-#     FIRST STEP of that path. This directly fixes two failure modes:
-#       - Dead-end / corridor trap: Euclidean direction pointed through walls;
-#         BFS correctly says "backtrack through visited cells to exit".
-#       - Oscillation: BFS gives a deterministic, optimal next-step direction
-#         instead of an ambiguous Euclidean hint.
+# Improvements over V1:
 #
 #   REWARD (no revisit penalty):
 #     The explicit revisit penalty (-0.3) discouraged backtracking, which is
 #     sometimes the only way to reach a remaining unvisited cell. It has been
 #     removed: revisiting a cell now costs only the step penalty (-0.1), making
-#     necessary backtracking inexpensive. The BFS frontier is now the primary
-#     navigation signal, so the penalty is no longer needed.
+#     necessary backtracking cheap. The model must learn on its own when to
+#     backtrack.
+#
+#   FLOOD FILL in reset():
+#     total_free_cells counts only cells reachable from the agent's starting
+#     position. Random obstacle placement can create isolated free cells that
+#     are physically unreachable; including them would make 100% coverage
+#     impossible and corrupt the coverage_ratio signal.
+#
+#   GUARANTEED NON-TRAPPED START:
+#     reset() ensures the agent has at least one free neighbor at episode start.
 #
 # Observation space (Dict):
 #   "agent"    : [x/size, y/size, coverage_ratio]   - shape (3,)
 #   "neighbors": 3x3 matrix of local view           - shape (3,3)
 #                  0 = free/unvisited, 1 = wall/obstacle, 2 = visited
-#   "frontier" : [first_dx, first_dy, dist_norm]    - shape (3,)
-#                  first step direction of BFS path to nearest unvisited cell
-#                  first_dx, first_dy ∈ {-1, 0, +1}; dist_norm ∈ [0, 1]
 #
 # Reward function:
 #   +1.0  visit new cell
@@ -58,7 +54,6 @@ class GridWorldCPPEnvV2(gym.Env):
 
         self.visited: set = set()
         self._reachable_cells: set = set()  # free cells reachable from agent start
-        self._known_obstacle_set: set = set()  # obstacles seen in 3x3 view (partial obs)
         self._agent_location = np.array([-1, -1], dtype=int)
         self._neighbors = np.zeros((3, 3), dtype=int)
 
@@ -71,11 +66,6 @@ class GridWorldCPPEnvV2(gym.Env):
             "neighbors": gym.spaces.Box(
                 low=np.zeros((3, 3), dtype=np.float32),
                 high=np.full((3, 3), 2.0, dtype=np.float32),
-                dtype=np.float32,
-            ),
-            "frontier": gym.spaces.Box(
-                low=np.array([-1.0, -1.0, 0.0], dtype=np.float32),
-                high=np.array([1.0, 1.0, 1.0], dtype=np.float32),
                 dtype=np.float32,
             ),
         })
@@ -120,52 +110,6 @@ class GridWorldCPPEnvV2(gym.Env):
                     queue.append((nx, ny))
         return reachable
 
-    def _get_frontier(self) -> np.ndarray:
-        """
-        BFS from the agent's position to the nearest unvisited free cell.
-        Traverses visited cells freely; blocked only by obstacles and grid boundaries.
-
-        Returns [first_dx, first_dy, dist_norm]:
-          - first_dx, first_dy: direction of the FIRST STEP of the optimal path
-            (each ∈ {-1, 0, +1}).  This correctly handles dead-ends: if backtracking
-            through visited cells is required, it points backward.
-          - dist_norm: BFS path length normalised to [0, 1].
-        """
-        if len(self.visited) >= self.total_free_cells:
-            return np.array([0.0, 0.0, 0.0], dtype=np.float32)
-
-        ax, ay = int(self._agent_location[0]), int(self._agent_location[1])
-        queue: deque = deque()
-        seen: set = {(ax, ay)}
-
-        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            nx, ny = ax + dx, ay + dy
-            if 0 <= nx < self.size and 0 <= ny < self.size and (nx, ny) not in self._known_obstacle_set:
-                seen.add((nx, ny))
-                queue.append((nx, ny, dx, dy, 1))
-
-        max_dist = 2 * self.size
-
-        while queue:
-            x, y, first_dx, first_dy, dist = queue.popleft()
-
-            if (x, y) not in self.visited:
-                return np.array([
-                    float(first_dx),
-                    float(first_dy),
-                    float(min(dist / max_dist, 1.0)),
-                ], dtype=np.float32)
-
-            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                nx, ny = x + dx, y + dy
-                if (0 <= nx < self.size and 0 <= ny < self.size
-                        and (nx, ny) not in self._known_obstacle_set
-                        and (nx, ny) not in seen):
-                    seen.add((nx, ny))
-                    queue.append((nx, ny, first_dx, first_dy, dist + 1))
-
-        return np.array([0.0, 0.0, 0.0], dtype=np.float32)
-
     def _get_obs(self):
         return {
             "agent": np.array([
@@ -174,7 +118,6 @@ class GridWorldCPPEnvV2(gym.Env):
                 self.coverage_ratio,
             ], dtype=np.float32),
             "neighbors": self._neighbors.astype(np.float32),
-            "frontier": self._get_frontier(),
         }
 
     def _get_info(self):
@@ -196,7 +139,6 @@ class GridWorldCPPEnvV2(gym.Env):
                     matrix[i][j] = 1
                 elif (nx, ny) in self._obstacle_set:
                     matrix[i][j] = 1
-                    self._known_obstacle_set.add((nx, ny))
                 elif (nx, ny) in self.visited:
                     matrix[i][j] = 2
         self._neighbors = matrix
@@ -215,7 +157,6 @@ class GridWorldCPPEnvV2(gym.Env):
         self.count_steps = 0
         self.obstacles_locations = []
         self._obstacle_set = set()
-        self._known_obstacle_set = set()
         self.visited = set()
 
         self._agent_location = self.np_random.integers(0, self.size, size=2, dtype=int)
@@ -274,7 +215,7 @@ class GridWorldCPPEnvV2(gym.Env):
         elif is_new_cell:
             reward += 1.0
             self.visited.add(current_pos)
-        # revisiting a cell costs only the step penalty above — backtracking is free
+        # revisiting a cell costs only the step penalty — backtracking is free
 
         full_coverage = len(self.visited) >= self.total_free_cells
         terminated = full_coverage

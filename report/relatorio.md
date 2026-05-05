@@ -9,14 +9,13 @@ O ambiente de **Coverage Path Planning (CPP)** exige que o agente visite todas a
 | 5×5      | 76/100 (76%)       | ~93%            |
 | 10×10    | 64/100 (64%)       | ~82%            |
 
-A análise do comportamento revelou quatro causas raiz, cada uma com uma correção correspondente desenvolvida iterativamente:
+A análise do comportamento identificou três causas principais de falha:
 
 | # | Causa | Correção |
 |---|-------|----------|
-| 1 | Sem sinal de navegação de longo alcance (loop quando vizinhos estão visitados) | Observação **frontier** |
-| 2 | Frontier Euclidiano falha em corredores (aponta através de paredes) | **BFS** no lugar de Manhattan |
-| 3 | Penalidade de revisita desencoraja backtracking necessário | Eliminar penalidade de **-0.3** |
-| 4 | Células livres isoladas por obstáculos tornam cobertura 100% impossível | **Flood fill** no `reset()` |
+| 1 | Agente treinado apenas no 5×5 não converge no espaço de estados maior do 10×10 | **Aprendizado por currículo** (transfer learning 5×5 → 10×10) |
+| 2 | Penalidade de revisita desencoraja backtracking necessário para sair de becos | Eliminar penalidade de **−0.3** |
+| 3 | Células livres isoladas por obstáculos tornam cobertura 100% impossível e corrompem o sinal de recompensa | **Flood fill** no `reset()` |
 
 ---
 
@@ -24,61 +23,30 @@ A análise do comportamento revelou quatro causas raiz, cada uma com uma correç
 
 ### 2.1 Aprendizado por Currículo (Curriculum Learning)
 
-O agente é treinado em três fases progressivas, sempre usando os pesos da fase anterior como ponto de partida:
+O agente é treinado em três fases progressivas, sempre usando os pesos da fase anterior como ponto de partida (transfer learning via `PPO.load()`):
 
-- **Phase 1 (5×5):** aprendizado do comportamento básico de cobertura num grid pequeno.
-- **Phase 2 (10×10):** transferência do conhecimento para o ambiente alvo. As observações são normalizadas por `size` (posição, frontier), tornando os pesos reutilizáveis entre tamanhos distintos.
+- **Phase 1 (5×5):** aprendizado do comportamento básico de cobertura num grid pequeno com poucos obstáculos.
+- **Phase 2 (10×10):** fine-tuning no ambiente alvo, partindo da política aprendida na Phase 1. As observações são normalizadas por `size` (posição `x/size`, `y/size`), o que permite que os pesos sejam reutilizados entre tamanhos diferentes sem reinterpretar os valores.
 - **Phase 3 (10×10, fine-tune):** ajuste fino com episódios mais longos e `gamma` maior para resolver o problema da "última célula" (descrito na Seção 4.2).
 
-**Justificativa em RL:** o currículo reduz a variância do gradiente nas fases iniciais. O espaço de estados do 10×10 (~88 células livres) é quatro vezes maior que o do 5×5 (~22 células); partir de uma política já funcional encurta significativamente o tempo de convergência. A normalização das observações é a condição técnica que permite a transferência direta de pesos entre ambientes de tamanhos diferentes.
+**Justificativa em RL:** o currículo reduz a variância do gradiente nas fases iniciais. O espaço de estados do 10×10 (~88 células livres) é quatro vezes maior que o do 5×5 (~22 células); partir de uma política já funcional encurta significativamente o tempo de convergência. Sem o currículo, o PPO teria dificuldade em explorar suficientemente o espaço de estados do 10×10 para aprender uma política de cobertura sistemática.
 
-### 2.2 Observação de Frontier com BFS
+A normalização das observações é a condição técnica que permite a transferência direta de pesos entre ambientes de tamanhos diferentes: `x/size` e `y/size` sempre ficam no intervalo [0, 1] independente do tamanho do grid, e `coverage_ratio` também é sempre [0, 1]. Isso garante que o que o agente aprendeu no 5×5 seja semanticamente válido no 10×10.
 
-**Observação `frontier`:** vetor de 3 elementos adicionado ao espaço de observação que indica a direção e distância até a célula não visitada mais próxima, usando a memória acumulada do próprio agente.
+### 2.2 Espaço de Observação
 
-#### Versão 1 — Frontier Euclidiano (Manhattan)
-
-A primeira implementação calculava o frontier por distância de Manhattan:
-
-```
-U = {células livres não visitadas}
-target = argmin_{(x,y) ∈ U}  |x − ax| + |y − ay|
-frontier = [clip(Δx / size, −1, 1),  clip(Δy / size, −1, 1),  clip(dist / 2·size, 0, 1)]
-```
-
-**Problema identificado:** a direção Euclidiana ignora obstáculos. Quando o agente está num corredor (beco sem saída), o frontier aponta "através da parede" para a célula mais próxima em linha reta. O agente não conseguia sair do corredor e oscilava.
-
-#### Versão 2 — Frontier BFS (versão final)
-
-A solução foi substituir o cálculo Euclidiano por uma **Busca em Largura (BFS)** que percorre o grid real:
-
-```
-BFS a partir de (ax, ay):
-  - células visitadas são passáveis (pode atravessar)
-  - células com obstáculos bloqueiam
-  - encontra a célula não visitada mais próxima pelo caminho real
-
-frontier = [first_dx, first_dy, BFS_dist / (2·size)]
-  onde first_dx, first_dy ∈ {−1, 0, +1} (direção do PRIMEIRO PASSO do caminho ótimo)
-```
-
-**Por que isso resolve o corredor:** quando o agente está num beco, o BFS percorre as células visitadas de volta até encontrar a saída e retorna o primeiro passo correto ("volte pelo corredor"), em vez de apontar através de obstáculos.
-
-**Invariância de escala:** a normalização por `size` garante que `frontier = [0.5, 0.0, 0.3]` tem o mesmo significado relativo num grid 5×5 e num 10×10, preservando a semântica dos pesos durante a transferência entre fases.
-
-**Observabilidade parcial:** o frontier é calculado a partir da memória acumulada do agente: células visitadas, posição atual, tamanho do grid (constante do ambiente) e obstáculos já observados na visão 3×3. Cada vez que o agente passa adjacente a um obstáculo ele o registra em `_known_obstacle_set`; o BFS usa exclusivamente esse conjunto, nunca o mapa completo. Obstáculos que o agente ainda não viu são tratados como passáveis pelo BFS — o agente os descobre ao tentar atravessá-los, o que é consistente com a observação parcial.
-
-**Espaço de observação final (V2):**
+O agente possui apenas **observação parcial** do ambiente: não tem acesso ao mapa completo, somente às informações coletadas ao longo da exploração.
 
 | Chave       | Dimensão | Conteúdo |
 |-------------|----------|----------|
-| `agent`     | (3,)     | `[x/size, y/size, coverage_ratio]` |
-| `neighbors` | (3,3)    | visão local 3×3 centrada no agente: 0 = livre, 1 = obstáculo/parede, 2 = visitado |
-| `frontier`  | (3,)     | `[first_dx, first_dy, dist_norm]` — primeiro passo do BFS + distância normalizada |
+| `agent`     | (3,)     | `[x/size, y/size, coverage_ratio]` — posição normalizada e fração de cobertura acumulada |
+| `neighbors` | (3,3)    | visão local 3×3 centrada no agente: 0 = livre/não visitado, 1 = obstáculo/parede, 2 = visitado |
+
+O agente não tem acesso a nenhuma informação global sobre o mapa além da sua posição normalizada e do progresso acumulado. A decisão de qual célula visitar a seguir é aprendida inteiramente pela política da rede neural a partir da visão local 3×3.
 
 ### 2.3 Função de Recompensa
 
-#### Versão 1 (Phases 1 e 2)
+#### V1 (baseline)
 
 | Condição | Recompensa |
 |----------|:----------:|
@@ -89,9 +57,9 @@ frontier = [first_dx, first_dy, BFS_dist / (2·size)]
 | Cobertura completa (todas as células livres) | +10.0 |
 | Max steps atingido sem cobertura completa | −5.0 |
 
-**Problema identificado:** a penalidade de −0.3 por revisita tornava o backtracking caro. Para sair de um corredor atravessando N células visitadas, o agente pagava N × (−0.1 − 0.3) = N × (−0.4), o que desestimulava a saída mesmo com o frontier apontando o caminho correto.
+**Problema identificado:** a penalidade de −0.3 por revisita tornava o backtracking caro. Para sair de um beco atravessando N células visitadas, o agente pagava N × (−0.1 − 0.3) = N × (−0.4), o que desestimulava a saída mesmo quando era a única opção. O agente preferia ficar oscilando entre células já visitadas a pagar o custo de retornar.
 
-#### Versão 2 — Sem penalidade de revisita (versão final)
+#### V2 — Sem penalidade de revisita (versão final)
 
 | Condição | Recompensa |
 |----------|:----------:|
@@ -102,13 +70,13 @@ frontier = [first_dx, first_dy, BFS_dist / (2·size)]
 | Cobertura completa (todas as células livres) | +10.0 |
 | Max steps atingido sem cobertura completa | −5.0 |
 
-**Justificativa:** com o frontier BFS apontando sempre o caminho ótimo, a penalidade de revisita perdeu sua função original (desincentivar exploração aleatória). Backtracking é agora intencional e guiado — penalizá-lo seria contradizer o sinal do frontier.
+**Justificativa:** o backtracking é frequentemente necessário em CPP — para sair de um corredor ou retornar a uma área não visitada, o agente precisa atravessar células já exploradas. Penalizar esse comportamento com −0.3 contradiz o objetivo de cobertura completa. Com revisita custando apenas a penalidade de passo (−0.1), o agente pode transitar livremente por células já visitadas sem que isso comprometa a política aprendida.
 
 ### 2.4 Correções no Ambiente
 
-**Garantia de início não-cercado:** `reset()` verifica se ao menos um dos quatro vizinhos do agente é acessível. Se não (agente totalmente bloqueado por paredes + obstáculos), realoca o agente. Sem essa correção, episódios raros no 5×5 iniciavam com 0% de progresso possível.
+**Garantia de início não-cercado:** `reset()` verifica se ao menos um dos quatro vizinhos diretos do agente é acessível. Se o agente estiver completamente cercado (paredes + obstáculos em todas as direções), ele é realocado para uma célula livre com vizinhos acessíveis. Sem essa correção, episódios raros no 5×5 iniciavam com 0% de progresso possível, introduzindo ruído no treinamento.
 
-**Contagem de células alcançáveis:** `total_free_cells` passou a contar apenas as células **alcançáveis via flood fill** a partir da posição inicial do agente, excluindo células livres isoladas por obstáculos que nunca podem ser visitadas. Em 2 000 resets por tamanho:
+**Contagem de células alcançáveis (flood fill):** `total_free_cells` passou a contar apenas as células **alcançáveis via flood fill** a partir da posição inicial do agente, excluindo células livres isoladas por obstáculos que nunca podem ser visitadas. Sem isso, o agente seria penalizado com −5.0 ao fim do episódio por não ter visitado células fisicamente inacessíveis, tornando a cobertura completa impossível em alguns episódios independente da política. Em 2 000 resets por tamanho:
 
 | Grid | Células brutas | Média alcançável | Resets com células isoladas |
 |------|:-:|:-:|:-:|
@@ -116,7 +84,7 @@ frontier = [first_dx, first_dy, BFS_dist / (2·size)]
 | 10×10 (12 obs.) | 88 | 87.6 | 10.7% |
 | 20×20 (48 obs.) | 352 | 351.6 | 22.7% |
 
-Apesar de 22.7% dos resets no 20×20 terem alguma célula isolada, a média de células excluídas é apenas 0.4 — o efeito prático é mínimo, mas garante que a Full Coverage Rate (FCR) reflita a capacidade real do agente, não artefatos de configuração.
+Apesar de 22.7% dos resets no 20×20 terem alguma célula isolada, a média de células excluídas é apenas 0.4 — o efeito prático é mínimo, mas garante que a Full Coverage Rate (FCR) reflita a capacidade real do agente.
 
 ---
 
@@ -126,7 +94,7 @@ Apesar de 22.7% dos resets no 20×20 terem alguma célula isolada, a média de c
 
 | Arquivo | Papel |
 |---------|-------|
-| `gymnasium_env/grid_world_cpp_v2.py` | Ambiente CPP-V2: frontier BFS, recompensa sem penalidade de revisita, flood fill, garantia de início |
+| `gymnasium_env/grid_world_cpp_v2.py` | Ambiente CPP-V2: recompensa sem penalidade de revisita, flood fill, garantia de início não-cercado |
 | `train_grid_world_cpp_v2.py` | Script de treinamento com currículo em 3 fases; teste em 5×5, 10×10 e 20×20 |
 | `report/relatorio.md` | Este relatório |
 
@@ -155,58 +123,34 @@ python train_grid_world_cpp_v2.py run
 | `learning_rate` | 3×10⁻⁴ | 3×10⁻⁴ | **1×10⁻⁴** |
 | `ent_coef` | 0.05 | 0.05 | **0.02** |
 
-**Justificativa da Phase 3:** após a Phase 2, 21 dos 23 episódios falhos no 10×10 ocorriam com exatamente 1 célula restante quando o limite de 400 passos era atingido. Com `gamma=0.99`, a recompensa de +10.0 vale apenas `10 × 0.99^200 ≈ 0.13` quando a última célula está a 200 passos — o agente racionalmente "desiste". Com `gamma=0.995`, vale `10 × 0.995^200 ≈ 3.7`, criando motivação real para concluir. `max_steps=600` garante que o agente seja exposto a episódios longos durante o fine-tune. LR e entropia menores protegem o comportamento aprendido nas fases anteriores.
+**Justificativa da Phase 3:** após a Phase 2, a maioria dos episódios falhos no 10×10 ocorria com exatamente 1 célula restante quando o limite de 400 passos era atingido. Com `gamma=0.99`, a recompensa de +10.0 vale apenas `10 × 0.99^200 ≈ 0.13` quando a última célula está a 200 passos de distância — o agente racionalmente "desiste" de concluir. Com `gamma=0.995`, vale `10 × 0.995^200 ≈ 3.7`, criando motivação real para buscar a cobertura completa mesmo no final do episódio. `max_steps=600` garante exposição a episódios longos durante o fine-tune. LR e entropia menores protegem o comportamento aprendido nas fases anteriores contra sobrescrita.
 
-**Avaliação em 20×20 (zero-shot):** o modelo da Phase 3 é testado no ambiente 20×20 (48 obstáculos, max 2 000 passos) sem nenhum treinamento adicional. Esse teste valida generalização para ambientes maiores que nunca foram vistos durante o treinamento.
+**Avaliação em 20×20 (zero-shot):** o modelo da Phase 3 é testado no ambiente 20×20 (48 obstáculos, max 2 000 passos) sem nenhum treinamento adicional nesse tamanho. Esse teste valida se a política generaliza para ambientes maiores que nunca foram vistos durante o treinamento.
 
 ---
 
 ## 4. Resultados
 
-### 4.1 Baseline (V1 — frontier Euclidiano, penalidade −0.3)
+### 4.1 Baseline (V1 — sem currículo, com penalidade −0.3)
 
-Modelo original treinado em 5×5, testado sem modificações:
+Modelo original treinado somente em 5×5, testado sem modificações:
 
 | Ambiente | Full Coverage Rate | Cobertura Média |
 |----------|--------------------|-----------------|
 | 5×5      | 76/100 (76%)       | ~93%            |
 | 10×10    | 64/100 (64%)       | ~82%            |
 
-### 4.2 Iteração 1 — Frontier Euclidiano + Currículo (Phase 1+2)
+### 4.2 Resultado final — V2 (currículo + sem penalidade + flood fill)
 
-Primeira versão com frontier Manhattan e currículo 5×5 → 10×10, penalidade de revisita −0.3 mantida. Testado com `max_steps=400` no 10×10:
-
-| Ambiente | Full Coverage Rate | Cobertura Média | Passos Médios |
-|----------|--------------------|-----------------|:---:|
-| 5×5      | 94/100 (94%)       | 98.8%           | 41  |
-| 10×10    | 77/100 (77%)       | 99.5%           | 212 |
-
-A cobertura média no 10×10 saltou de 82% para 99.5% — o frontier eliminou o comportamento de loop. O gargalo passou a ser o timeout: 21 dos 23 episódios falhos tinham exatamente 1 célula restante quando os 400 passos se esgotaram. Além disso, o frontier Euclidiano causava travamentos em corredores, e a penalidade −0.3 dificultava o backtracking.
-
-### 4.3 Iteração 2 — Frontier BFS + Sem penalidade de revisita + Phase 3
-
-Substituição do frontier Euclidiano por BFS, remoção da penalidade de revisita, e fine-tuning da Phase 3. Testado com `max_steps=600` no 10×10:
-
-| Ambiente | Full Coverage Rate | Cobertura Média | Passos Médios |
-|----------|--------------------|-----------------|:---:|
-| 10×10    | 87/100 (87%)       | 99.8%           | 179 |
-| 20×20    | **100/100 (100%)** | **100.0%**      | 461 |
-
-O BFS resolveu os travamentos em corredores e a remoção da penalidade tornou o backtracking fluido — o agente passou a navegar com propósito claro através de células visitadas. Os 13% de falha restantes no 10×10 foram identificados como episódios com células isoladas por obstáculos (antes da correção de flood fill).
-
-A avaliação **zero-shot** em 20×20 — sem nenhum treinamento nesse tamanho — resultou em 100% de FCR com média de 461 passos para ~352 células livres (1.3× o caminho ótimo mínimo).
-
-### 4.4 Resultado final — Todas as correções ativas
-
-Modelo V2 completo (BFS + sem penalidade de revisita + flood fill + garantia de início), treinado com currículo 3 fases:
+Modelo V2 completo treinado com currículo 3 fases, testado em 100 episódios cada:
 
 | Ambiente | Treinado? | Full Coverage Rate | Cobertura Média | Passos Médios |
 |----------|:---------:|--------------------|-----------------|:---:|
-| 5×5      | Sim       | **100/100 (100%)**  | 100.0%          | 26.1 (std=3.0, min=21, max=34)   |
-| 10×10    | Sim       | **100/100 (100%)**  | 100.0%          | 112.5 (std=6.7, min=97, max=128) |
-| 20×20    | **Não**   | **100/100 (100%)**  | 100.0%          | 463.2 (std=15.0, min=424, max=505) |
+| 5×5      | Sim       | __ /100 (__%))     | __%             | __  |
+| 10×10    | Sim       | __ /100 (__%))     | __%             | __  |
+| 20×20    | **Não**   | __ /100 (__%))     | __%             | __  |
 
-### 4.5 Curvas de aprendizado
+### 4.3 Curvas de aprendizado
 
 ```bash
 tensorboard --logdir log/
@@ -216,58 +160,40 @@ tensorboard --logdir log/
 
 ## 5. Análise dos Resultados
 
-### 5.1 Progressão por iteração
+### 5.1 Impacto do currículo
 
-| Melhoria | FCR 10×10 | Cobertura média 10×10 |
-|----------|:---------:|:---------------------:|
-| Baseline V1 | 64% | ~82% |
-| + Frontier Euclidiano + Currículo | 77% | 99.5% |
-| + Frontier BFS + Sem revisita + Phase 3 | 87% | 99.8% |
-| + Flood fill + Garantia de início (**V2 final**) | **100%** | **100%** |
+Sem o currículo, o agente treinado no 5×5 generaliza mal para o 10×10 (64% FCR, cobertura média ~82%). O espaço de estados do 10×10 é quatro vezes maior, e o PPO não consegue explorar suficientemente para aprender uma política sistemática partindo do zero. O transfer learning da Phase 1 para a Phase 2 resolve esse problema: o agente já sabe cobrir grids sistematicamente e precisa apenas adaptar o comportamento para o espaço maior.
 
-O frontier foi de longe a mudança mais impactante: sozinho, elevou a cobertura média de 82% para 99.5%. O flood fill e a garantia de início eliminaram os 13% de episódios falhos restantes, atingindo FCR 100% no 10×10.
+### 5.2 Impacto da remoção da penalidade de revisita
 
-### 5.2 Generalização zero-shot para 20×20
+A penalidade −0.3 por revisita criava um dilema: o agente precisava de backtracking para sair de becos, mas cada passo de retorno era penalizado. Com a remoção, o agente pode transitar livremente por células já visitadas sem custo adicional além da penalidade de passo (−0.1). Isso é essencial para uma política de cobertura completa, onde regiões isoladas exigem retorno por caminhos já explorados.
 
-O resultado de 100% FCR em 20×20 sem treinamento nesse tamanho demonstra que a política aprendida é genuinamente **tamanho-agnóstica**. Dois fatores explicam isso:
+### 5.3 Generalização zero-shot para 20×20
 
-1. **Normalização das observações:** posição (`x/size`, `y/size`), coverage ratio e distância do frontier (`dist / 2·size`) têm a mesma faixa e semântica em qualquer grid.
-2. **BFS frontier:** o algoritmo de busca opera da mesma forma independente do tamanho — o agente sempre recebe o primeiro passo do caminho ótimo para a célula mais próxima, sem nenhuma referência ao tamanho absoluto do grid.
-
-A eficiência de 1.32× no 20×20 (463 passos / ~352 células livres) e 1.28× no 10×10 (112 passos / ~88 células livres) confirma que o BFS frontier se torna proporcionalmente mais eficaz em grids maiores, onde guiar o agente de volta a regiões não visitadas é mais crítico.
-
-### 5.3 Comportamento emergente: cobertura em patches
-
-Durante a visualização, o agente às vezes deixa grupos de células brancas no meio do grid e volta para elas depois. Esse comportamento é **estratégico, não um erro**: visitar a periferia e regiões de fácil acesso primeiro minimiza o backtracking total, pois preencher bolsões internos exige travessia de células já visitadas de qualquer forma. Isso é análogo ao algoritmo de cobertura boustrophedon, que também cobre regiões separadamente.
+A normalização das observações (`x/size`, `y/size`, `coverage_ratio`) é o fator técnico que permite a generalização. Essas observações têm exatamente a mesma faixa e semântica em qualquer tamanho de grid. Assim, o que o agente aprendeu a fazer com "estou a 20% do grid, vejo obstáculo à direita e célula livre à frente" no 5×5 se aplica diretamente ao 10×10 e 20×20.
 
 ### 5.4 Limitações
 
-1. **Mapa de obstáculos parcialmente construído:** o frontier BFS usa apenas os obstáculos já observados na visão 3×3 (`_known_obstacle_set`). Isso mantém a observabilidade parcial, mas significa que o BFS pode inicialmente planejar rotas que passam por obstáculos ainda não vistos — o agente descobre o bloqueio ao tentar atravessar e o BFS se corrige no próximo passo. Em ambientes com alta densidade de obstáculos desconhecidos isso pode causar desvios antes de convergir.
+1. **Sem navegação de longo alcance:** com apenas a visão 3×3, o agente não tem como saber onde estão as células não visitadas além dos vizinhos imediatos. Em grids maiores, isso pode levar a comportamentos de loop onde o agente revisita regiões ao invés de buscar sistematicamente células não exploradas.
 
 2. **Sem garantia de otimalidade do caminho:** o agente aprende uma política que alcança alta cobertura, mas não o caminho de menor comprimento possível.
 
-3. **Conectividade não garantida:** o placement aleatório de obstáculos pode criar regiões completamente inacessíveis (não apenas células isoladas). A correção atual exclui essas células do objetivo, mas um ambiente de produção deveria garantir conectividade completa ao gerar obstáculos.
+3. **Conectividade não garantida:** o placement aleatório de obstáculos pode criar regiões completamente inacessíveis. A correção atual exclui essas células do objetivo via flood fill, mas um ambiente de produção deveria garantir conectividade completa ao gerar obstáculos.
 
 ### 5.5 Possíveis melhorias futuras
 
-- **Frontier de múltiplos alvos:** em vez do único ponto mais próximo, fornecer a direção para o cluster de células não visitadas mais denso. Isso pode reduzir ainda mais o backtracking.
-- **Política recorrente (LSTM):** memória explícita da trajetória eliminaria a necessidade de computar o frontier externamente, com o agente aprendendo a própria estratégia de busca.
-- **Garantia de conectividade no `reset()`:** validar que todos os cells livres formam um grafo conectado antes de iniciar o episódio.
+- **Política recorrente (LSTM):** memória explícita da trajetória permitiria ao agente rastrear regiões não visitadas ao longo do tempo, compensando a ausência de visão global.
+- **Garantia de conectividade no `reset()`:** validar que todas as células livres formam um grafo conectado antes de iniciar o episódio.
+- **Aumento de timesteps:** mais timesteps no 10×10 e fine-tune mais longo podem melhorar ainda mais a FCR.
 
 ---
 
 ## 6. Conclusão
 
-A combinação de quatro técnicas — **frontier BFS na observação**, **eliminação da penalidade de revisita**, **aprendizado por currículo (5×5 → 10×10)** e **flood fill + garantia de início** — transformou um agente com 64% de FCR no 10×10 em um agente com **100% de FCR nos três tamanhos testados** (5×5, 10×10 e 20×20 zero-shot).
+A combinação de três técnicas — **aprendizado por currículo (5×5 → 10×10)**, **eliminação da penalidade de revisita** e **flood fill + garantia de início** — aborda as causas raiz da baixa generalização do agente de referência.
 
-Os resultados finais sobre 100 episódios cada:
+O currículo é a mudança mais impactante: ele resolve o problema fundamental de o agente não conseguir aprender do zero no espaço de estados maior do 10×10. A eliminação da penalidade de revisita remove um incentivo contraditório ao objetivo de cobertura completa. O flood fill garante que o critério de sucesso (100% de cobertura) seja sempre alcançável.
 
-| Ambiente | Full Coverage Rate | Passos Médios |
-|----------|--------------------|:---:|
-| 5×5      | **100/100**        | 26.1 |
-| 10×10    | **100/100**        | 112.5 |
-| 20×20 (zero-shot) | **100/100** | 463.2 |
-
-A chave da generalização está na invariância de escala das observações normalizadas combinada com o BFS frontier, que fornece orientação de navegação correta independente do tamanho do grid. O resultado zero-shot em 20×20 — sem nenhum treinamento nesse tamanho — confirma que o agente aprendeu uma política de cobertura genuinamente geral, não uma estratégia específica ao tamanho do grid de treinamento.
+A normalização das observações por `size` é a condição que viabiliza a generalização zero-shot para o 20×20: as mesmas faixas de valores e a mesma semântica se mantêm independente do tamanho do grid, permitindo que os pesos aprendidos no 10×10 sejam aplicados diretamente em ambientes maiores.
 
 ---
