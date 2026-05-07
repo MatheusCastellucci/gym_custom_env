@@ -27,7 +27,8 @@ import pygame
 #
 # Observation space (Dict):
 #   "agent"    : [x/size, y/size, coverage_ratio]   - shape (3,)
-#   "neighbors": 3x3 matrix of local view           - shape (3,3)
+#   "neighbors": 5x5 matrix of local view           - shape (5,5)
+#                  agent is always at center (2,2)
 #                  0 = free/unvisited, 1 = wall/obstacle, 2 = visited
 #
 # Reward function:
@@ -55,7 +56,7 @@ class GridWorldCPPEnvV2(gym.Env):
         self.visited: set = set()
         self._reachable_cells: set = set()  # free cells reachable from agent start
         self._agent_location = np.array([-1, -1], dtype=int)
-        self._neighbors = np.zeros((3, 3), dtype=int)
+        self._neighbors = np.zeros((5, 5), dtype=int)
 
         self.observation_space = gym.spaces.Dict({
             "agent": gym.spaces.Box(
@@ -64,8 +65,8 @@ class GridWorldCPPEnvV2(gym.Env):
                 dtype=np.float32,
             ),
             "neighbors": gym.spaces.Box(
-                low=np.zeros((3, 3), dtype=np.float32),
-                high=np.full((3, 3), 2.0, dtype=np.float32),
+                low=np.zeros((5, 5), dtype=np.float32),
+                high=np.full((5, 5), 2.0, dtype=np.float32),
                 dtype=np.float32,
             ),
         })
@@ -130,11 +131,11 @@ class GridWorldCPPEnvV2(gym.Env):
         }
 
     def _set_neighbors(self):
-        matrix = np.zeros((3, 3), dtype=int)
-        for i in range(3):
-            for j in range(3):
-                nx = self._agent_location[0] + (j - 1)
-                ny = self._agent_location[1] + (i - 1)
+        matrix = np.zeros((5, 5), dtype=int)
+        for i in range(5):
+            for j in range(5):
+                nx = self._agent_location[0] + (j - 2)
+                ny = self._agent_location[1] + (i - 2)
                 if not (0 <= nx < self.size and 0 <= ny < self.size):
                     matrix[i][j] = 1
                 elif (nx, ny) in self._obstacle_set:
