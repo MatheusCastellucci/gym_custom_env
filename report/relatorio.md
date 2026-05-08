@@ -86,7 +86,13 @@ O agente não tem acesso a nenhuma informação global sobre o mapa. A decisão 
 
 **Garantia de início não-cercado:** `reset()` verifica se ao menos um dos quatro vizinhos diretos do agente é acessível. Se o agente estiver completamente cercado (paredes + obstáculos em todas as direções), ele é realocado. Sem essa correção, episódios raros iniciavam com 0% de progresso possível, introduzindo ruído no treinamento.
 
-**Contagem de células alcançáveis (flood fill):** `total_free_cells` conta apenas as células **alcançáveis via flood fill** a partir da posição inicial do agente, excluindo células livres isoladas por obstáculos que nunca podem ser visitadas. Sem isso, o agente seria penalizado com −5.0 por não visitar células fisicamente inacessíveis, tornando a cobertura completa impossível em alguns episódios. Em 2 000 resets por tamanho:
+**Contagem de células alcançáveis (flood fill):** `total_free_cells` conta apenas as células **alcançáveis via flood fill** a partir da posição inicial do agente, excluindo células livres isoladas por obstáculos que nunca podem ser visitadas.
+
+**Justificativa:** o posicionamento aleatório de obstáculos pode, em alguns episódios, criar células livres que são fisicamente inacessíveis — cercadas por obstáculos em todas as direções. Sem o flood fill, o agente receberia −5.0 ao final desses episódios por não ter visitado células que ele **nunca poderia visitar**, independente de qual política aprendesse. Isso não é uma falha do agente — é uma configuração inválida do ambiente.
+
+O flood fill **não exclui episódios nem facilita o problema**: o episódio roda normalmente e o agente ainda precisa visitar fisicamente todas as células alcançáveis. A única mudança é que o critério de sucesso ("cobertura completa") passa a ser definido como "visitou todas as células que pode alcançar a partir de onde está", o que é a única definição matematicamente possível de 100% de cobertura. Sem essa correção, o objetivo seria impossível de atingir em episódios com células isoladas, e a penalidade de −5.0 introduziria ruído espúrio no gradiente do PPO.
+
+Em 2 000 resets por tamanho:
 
 | Grid | Células brutas | Média alcançável | Resets com células isoladas |
 |------|:-:|:-:|:-:|
@@ -94,7 +100,7 @@ O agente não tem acesso a nenhuma informação global sobre o mapa. A decisão 
 | 10×10 (12 obs.) | 88 | 87.6 | 10.7% |
 | 20×20 (48 obs.) | 352 | 351.6 | 22.7% |
 
-Apesar de 22.7% dos resets no 20×20 terem alguma célula isolada, a média de células excluídas é apenas 0.4 — o efeito prático é mínimo, mas garante que a FCR reflita a capacidade real do agente.
+Apesar de 22.7% dos resets no 20×20 terem alguma célula isolada, a média de células excluídas por episódio é apenas 0.4 — o efeito prático é mínimo, mas garante que a Full Coverage Rate reflita a capacidade real do agente, não artefatos do gerador de obstáculos.
 
 ---
 
